@@ -1249,9 +1249,7 @@ def render_detail(row: pd.Series):
             unsafe_allow_html=True,
         )
  
-        # ── Review action panel ─────────────────────────────────────────
-        st.markdown("### إجراء المراجعة")
- 
+      
         # ── Review action panel ─────────────────────────────────────────
         st.markdown("### إجراء المراجعة")
  
@@ -1284,7 +1282,7 @@ def render_detail(row: pd.Series):
                     st.error(f"فشل الحفظ: {type(e).__name__}: {e}")
  
         with tab_reject:
-            st.write("ارفضي الصورة واطلبي إعادة توليد. اشرحي الملاحظات بدقة.")
+            st.write("ارفض الصورة واطلب إعادة توليد. اشرح الملاحظات بدقة.")
             reason = st.text_area(
                 "سبب الرفض",
                 value="",
@@ -1299,7 +1297,7 @@ def render_detail(row: pd.Series):
             )
  
             # ── Prompt Repair Agent ─────────────────────────────────────────
-            st.markdown("##### 🤖 اقتراح برومت جديد بناءً على ملاحظاتك")
+            st.markdown("#####  اقتراح برومت جديد بناءً على ملاحظاتك")
             st.caption(
                 "الإيجنت يقرأ ملاحظات الرفض ويقترح برومت جديد. "
                 "يحفظ الاقتراح في `regenerated_prompt`. لا يولّد صورة في هذه الخطوة."
@@ -1308,7 +1306,7 @@ def render_detail(row: pd.Series):
             agent_key      = f"agent_result_{row.get(COL_UID, '')}"
             agent_note_key = f"agent_note_{row.get(COL_UID, '')}"
  
-            if st.button("✨ اقتراح برومت جديد",
+            if st.button(" اقتراح برومت جديد",
                          use_container_width=True, key="btn_agent"):
                 try:
                     with st.spinner("جاري توليد الاقتراح..."):
@@ -1348,7 +1346,7 @@ def render_detail(row: pd.Series):
                                 COL_PROMPT_REPAIR_NOTE:    repair_note,
                             },
                         )
-                        st.success("✅ تم توليد الاقتراح وحفظه في regenerated_prompt.")
+                        st.success(" تم توليد الاقتراح وحفظه في regenerated_prompt.")
                     else:
                         # ما نحفظ برومت ناقص/خاطئ، بس نسجل ملاحظة الإصلاح
                         st.session_state[agent_note_key] = repair_note
@@ -1369,7 +1367,7 @@ def render_detail(row: pd.Series):
             shown_note = st.session_state.get(agent_note_key) or \
                          str(row.get(COL_PROMPT_REPAIR_NOTE, "")).strip()
             if shown_note and shown_note not in ("passed", "ok"):
-                st.info(f"ℹ️ ملاحظة الإيجنت: {shown_note}")
+                st.info(f"ملاحظة الإيجنت: {shown_note}")
  
             # اعرض آخر اقتراح (من session أو من الشيت)
             shown_prompt = (
@@ -1392,7 +1390,7 @@ def render_detail(row: pd.Series):
  
             # ═══════ توليد صورة جديدة ═══════
             st.divider()
-            st.markdown("##### 🖼️ توليد صورة جديدة من البرومت المُقترَح")
+            st.markdown("#####  توليد صورة جديدة من البرومت المُقترَح")
  
             # — Test Mode toggle —
             test_mode = st.toggle(
@@ -1410,9 +1408,9 @@ def render_detail(row: pd.Series):
                 f"في الجلسة (متبقي: {max(remaining, 0)})"
             )
             if remaining <= 2 and remaining > 0:
-                st.warning(f"⚠️ متبقي {remaining} توليدات فقط في هذه الجلسة.")
+                st.warning(f" متبقي {remaining} توليدات فقط في هذه الجلسة.")
             elif remaining <= 0:
-                st.error("⛔ تجاوزتِ الحد الأقصى. أعيدي تحميل الصفحة لإعادة العداد.")
+                st.error(" تجاوزتِ الحد الأقصى. أعيدي تحميل الصفحة لإعادة العداد.")
  
             gen_disabled = (
                 (not shown_prompt) or remaining <= 0
@@ -1425,7 +1423,7 @@ def render_detail(row: pd.Series):
  
             mode_label = "Test" if test_mode else "🚨 Production (يستبدل الأصل)"
             if st.button(
-                f"🖼️ توليد صورة جديدة — {mode_label}",
+                f" توليد صورة جديدة — {mode_label}",
                 use_container_width=True,
                 disabled=gen_disabled,
                 help=gen_help,
@@ -1435,7 +1433,7 @@ def render_detail(row: pd.Series):
                     with st.spinner("جاري توليد الصورة..."):
                         ok, img_bytes, err = generate_image_bytes(shown_prompt)
                     if not ok:
-                        st.error(f"❌ فشل التوليد: {err}")
+                        st.error(f" فشل التوليد: {err}")
                     else:
                         # filename مبني على image_filename الأصلي + suffix
                         base_fname = str(row.get(COL_FILENAME, "image.png"))
@@ -1451,7 +1449,7 @@ def render_detail(row: pd.Series):
                             )
  
                         if not up_ok:
-                            st.error(f"❌ فشل رفع Drive: {up_err}")
+                            st.error(f" فشل رفع Drive: {up_err}")
                         else:
                             now_ts = now_riyadh_iso()
                             st.session_state["gen_count"] = session_count + 1
@@ -1470,7 +1468,7 @@ def render_detail(row: pd.Series):
                                     sheet_row_number=str(row.get(COL_ROW_NUMBER, "")),
                                     updates=updates,
                                 )
-                                st.success("✅ تم التوليد. النتيجة محفوظة في أعمدة test_* (الأصل لم يُلمَس).")
+                                st.success(" تم التوليد. النتيجة محفوظة في أعمدة test_* (الأصل لم يُلمَس).")
                             else:
                                 # Production: استبدال + سجل
                                 prev_url = str(row.get(COL_IMAGE_URL, ""))
@@ -1506,7 +1504,7 @@ def render_detail(row: pd.Series):
                                     updates=updates,
                                 )
                                 st.success(
-                                    f"✅ تم استبدال الصورة بالنسخة الجديدة. "
+                                    f" تم استبدال الصورة بالنسخة الجديدة. "
                                     f"الرابط القديم محفوظ في previous_image_url. "
                                     f"العداد: {new_count}."
                                 )
@@ -1546,7 +1544,7 @@ def render_detail(row: pd.Series):
                             "approved_image_url":          "",
                         },
                     )
-                    st.success("✅ تم حفظ طلب إعادة التوليد.")
+                    st.success(" تم حفظ طلب إعادة التوليد.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"فشل الحفظ: {type(e).__name__}: {e}")
@@ -1582,7 +1580,7 @@ def render_table(df: pd.DataFrame):
                     st.markdown("🖼️")
             else:
                 st.markdown(
-                    '<div style="font-size:22px;color:#C9C4B8;">🖼️</div>',
+                    '<div style="font-size:22px;color:#C9C4B8;"></div>',
                     unsafe_allow_html=True,
                 )
  
