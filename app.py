@@ -1417,7 +1417,7 @@ def render_detail(row: pd.Series):
             )
             gen_help = None
             if not shown_prompt:
-                gen_help = "لازم تولّدي اقتراح برومت أولاً."
+                gen_help = "لازم تولّد اقتراح برومت أولاً."
             elif remaining <= 0:
                 gen_help = "وصلتِ الحد الأقصى للجلسة."
  
