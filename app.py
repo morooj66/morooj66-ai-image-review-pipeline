@@ -809,6 +809,68 @@ def get_openai_client() -> Optional["OpenAI"]:
     return OpenAI(api_key=key)
 
 
+def diagnose_openai_setup() -> str:
+    """Return a precise Arabic message explaining why OpenAI is unavailable."""
+    if OpenAI is None:
+        return (
+            "مكتبة openai غير مثبتة في البيئة. "
+            "شغّلي في الـ terminal: pip install openai"
+        )
+    try:
+        secrets_root = st.secrets
+    except (FileNotFoundError, Exception) as e:
+        return (
+            f"ملف secrets.toml غير موجود أو لا يمكن قراءته ({type(e).__name__}). "
+            f"تأكدي من وجوده في .streamlit/secrets.toml محلياً، "
+            f"أو في App Settings → Secrets على Streamlit Cloud."
+        )
+
+    # check section
+    try:
+        openai_section = secrets_root["openai"]
+    except (KeyError, AttributeError):
+        # list what sections ARE present (without leaking values)
+        try:
+            present = list(secrets_root.keys())
+        except Exception:
+            present = []
+        return (
+            "قسم [openai] غير موجود في secrets. "
+            f"الأقسام الموجودة حالياً: {present or '(لا شيء)'}. "
+            "أضيفي:\n\n[openai]\napi_key = \"sk-...\""
+        )
+
+    # check key inside section
+    try:
+        key = openai_section["api_key"]
+    except (KeyError, TypeError):
+        try:
+            sub_keys = list(openai_section.keys())
+        except Exception:
+            sub_keys = []
+        return (
+            f"المفتاح api_key غير موجود داخل [openai]. "
+            f"الحقول الموجودة داخله: {sub_keys}. "
+            "اسم الحقل الصحيح بالضبط: api_key"
+        )
+
+    if not key or not str(key).strip():
+        return "قيمة api_key فارغة. تأكدي من نسخ المفتاح كاملاً."
+
+    if not str(key).startswith("sk-"):
+        return (
+            f"قيمة api_key لا تبدأ بـ sk- (تبدأ بـ '{str(key)[:5]}...'). "
+            "تأكدي من نسخ المفتاح الصحيح من https://platform.openai.com/api-keys"
+        )
+
+    # Key looks valid but client construction may still fail
+    try:
+        OpenAI(api_key=key)
+        return "كل شيء يبدو صحيحاً — أعيدي تشغيل Streamlit (Ctrl+C ثم streamlit run app.py)."
+    except Exception as e:
+        return f"فشل تهيئة OpenAI client رغم وجود المفتاح: {type(e).__name__}: {e}"
+
+
 AGENT_SYSTEM_PROMPT = """أنت Prompt Repair Agent محدود الصلاحية لمشروع توليد صور قاموس عربي.
 
 # مهمتك الوحيدة
@@ -978,10 +1040,7 @@ def run_prompt_repair_agent(
     يقبل قائمة issues منظَّمة (من multiselect) بالإضافة للنصوص الحرة."""
     client = get_openai_client()
     if client is None:
-        raise RuntimeError(
-            "مفتاح OpenAI غير مُعَدّ. أضيفي في secrets.toml قسم [openai] "
-            "وفيه api_key = \"sk-...\""
-        )
+        raise RuntimeError(diagnose_openai_setup())
 
     issues_block = "(لم تُحدَّد فئات)"
     if issues:
