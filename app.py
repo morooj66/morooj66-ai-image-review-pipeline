@@ -18,6 +18,7 @@ It ONLY adds/updates the 12 review columns listed in REVIEW_COLUMNS below.
 
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 from datetime import datetime, timezone, timedelta
@@ -67,6 +68,30 @@ AGENT_MODEL     = "gpt-4o-mini"
 AGENT_TEMP      = 0.2
 DEFAULT_REVIEWER_NAME = "reviewer"   # حقل اسم المراجع شيلناه — قيمة افتراضية
 
+# Image generation
+IMAGE_MODEL          = "gpt-image-1"
+IMAGE_SIZE           = "1024x1024"
+IMAGE_QUALITY        = "medium"
+IMAGE_BACKGROUND_HEX = "#FAFAFA"
+
+# Per-session generation safety
+MAX_GENERATIONS_PER_SESSION = 10
+
+# Test Mode default = ON (احتراماً لطلب المراجع: لا نلمس image_url إلا بإرادة صريحة)
+TEST_MODE_DEFAULT = True
+
+# Tracking columns (auto-added if missing)
+COL_REGEN_COUNT          = "regeneration_count"
+COL_LAST_REGEN_AT        = "last_regenerated_at"
+COL_REGEN_HISTORY        = "regeneration_history"
+COL_PROMPT_REPAIR_STATUS = "prompt_repair_status"
+COL_PROMPT_REPAIR_NOTE   = "prompt_repair_note"
+COL_TEST_PROMPT          = "test_regenerated_prompt"
+COL_TEST_IMG_URL         = "test_regenerated_image_url"
+COL_TEST_REGEN_AT        = "test_regenerated_at"
+COL_TEST_NOTE            = "test_regeneration_note"
+COL_PREVIOUS_URL         = "previous_image_url"
+
 # Review columns (auto-created if missing)
 REVIEW_COLUMNS: List[str] = [
     "review_status",
@@ -81,6 +106,17 @@ REVIEW_COLUMNS: List[str] = [
     "regeneration_note",
     "approved_image_url",
     "previous_image_url",
+    # — تتبع إعادة التوليد —
+    COL_REGEN_COUNT,
+    COL_LAST_REGEN_AT,
+    COL_REGEN_HISTORY,
+    COL_PROMPT_REPAIR_STATUS,
+    COL_PROMPT_REPAIR_NOTE,
+    # — Test Mode —
+    COL_TEST_PROMPT,
+    COL_TEST_IMG_URL,
+    COL_TEST_REGEN_AT,
+    COL_TEST_NOTE,
 ]
 
 # Review status values
@@ -132,15 +168,21 @@ st.markdown("""
     [data-testid="stSidebar"] * { direction: rtl; text-align: right; }
 
     /* ── Headings ────────────────────────────────────── */
-    h1, h2, h3, h4 { color: #2A2A2A; text-align: right; }
+    h1, h2, h3, h4, h5, h6,
+    h1 *, h2 *, h3 *, h4 *, h5 *, h6 * {
+        color: #1A1A1A !important;
+        -webkit-text-fill-color: #1A1A1A !important;
+        text-align: right;
+        opacity: 1 !important;
+    }
     .app-header {
         text-align: right;
         padding: 8px 0 18px 0;
         border-bottom: 1px solid #E6E2DA;
         margin-bottom: 20px;
     }
-    .app-header .title { font-size: 26px; font-weight: 700; color: #2A2A2A; }
-    .app-header .subtitle { font-size: 14px; color: #7A7A7A; margin-top: 4px; }
+    .app-header .title { font-size: 26px; font-weight: 700; color: #1A1A1A !important; -webkit-text-fill-color: #1A1A1A !important; }
+    .app-header .subtitle { font-size: 14px; color: #5A5A5A !important; -webkit-text-fill-color: #5A5A5A !important; margin-top: 4px; }
 
     /* ── Stat cards ──────────────────────────────────── */
     .stat-card {
@@ -174,6 +216,23 @@ st.markdown("""
         margin-bottom: 10px;
         box-shadow: 0 1px 2px rgba(0,0,0,0.02);
     }
+    .row-card,
+    .row-card * {
+        color: #1A1A1A !important;
+        -webkit-text-fill-color: #1A1A1A !important;
+        opacity: 1 !important;
+    }
+    .row-card pre, .row-card code, .row-card .prompt-text {
+        background: #F8F6F1 !important;
+        color: #1A1A1A !important;
+        -webkit-text-fill-color: #1A1A1A !important;
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 13px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
     .row-card:hover { border-color: #C58A1A; }
 
     /* ── Status pills ────────────────────────────────── */
@@ -182,20 +241,23 @@ st.markdown("""
         padding: 4px 14px;
         border-radius: 999px;
         font-size: 12px;
-        font-weight: 600;
+        font-weight: 700;
         border: 1px solid transparent;
+        opacity: 1 !important;
     }
-    .pill-pending  { background: #F3F1ED; color: #6B6B6B; border-color: #E0DCD3; }
-    .pill-approved { background: #E6F4EE; color: #0E8E62; border-color: #BFE3D1; }
-    .pill-rejected { background: #FBEFD9; color: #C58A1A; border-color: #F1D9A8; }
+    .pill-pending,  .pill-pending *  { background: #F3F1ED; color: #3A3A3A !important; -webkit-text-fill-color: #3A3A3A !important; border-color: #C9C2B4; }
+    .pill-approved, .pill-approved * { background: #DCEFE4; color: #0A6E4B !important; -webkit-text-fill-color: #0A6E4B !important; border-color: #8BC9A8; }
+    .pill-rejected, .pill-rejected * { background: #F7E4BE; color: #8A5E0E !important; -webkit-text-fill-color: #8A5E0E !important; border-color: #E2B964; }
 
-    .category-pill {
+    .category-pill, .category-pill * {
         display: inline-block;
         padding: 4px 12px;
         border-radius: 8px;
         background: #F3F1ED;
-        color: #5A5A5A;
+        color: #3A3A3A !important;
+        -webkit-text-fill-color: #3A3A3A !important;
         font-size: 12px;
+        font-weight: 600;
     }
 
     /* ── Buttons ─────────────────────────────────────── */
@@ -223,8 +285,215 @@ st.markdown("""
         direction: rtl;
         text-align: right;
         border-radius: 8px;
-        border: 1px solid #DDD7CB;
-        background: #FFFFFF;
+        border: 1px solid #DDD7CB !important;
+        background: #FFFFFF !important;
+        color: #1A1A1A !important;
+        font-size: 14px !important;
+        -webkit-text-fill-color: #1A1A1A !important;  /* Safari */
+    }
+    .stTextInput input::placeholder,
+    .stTextArea textarea::placeholder {
+        color: #9C9C9C !important;
+        opacity: 1 !important;
+        -webkit-text-fill-color: #9C9C9C !important;
+    }
+
+    /* ── Force readable colors on EVERY widget label ──── */
+    label, label *,
+    [data-testid="stWidgetLabel"],
+    [data-testid="stWidgetLabel"] *,
+    .stTextInput label, .stTextInput label *,
+    .stTextArea label, .stTextArea label *,
+    .stMultiSelect label, .stMultiSelect label *,
+    .stSelectbox label, .stSelectbox label *,
+    .stCheckbox label, .stCheckbox label *,
+    .stRadio label, .stRadio label *,
+    .stToggle label, .stToggle label * {
+        color: #2A2A2A !important;
+        -webkit-text-fill-color: #2A2A2A !important;
+        font-weight: 500 !important;
+        font-size: 14px !important;
+        opacity: 1 !important;
+    }
+
+    /* Captions (st.caption) and small text */
+    [data-testid="stCaptionContainer"],
+    [data-testid="stCaptionContainer"] *,
+    .stCaption, .stCaption *, small {
+        color: #4A4A4A !important;
+        -webkit-text-fill-color: #4A4A4A !important;
+        font-size: 13px !important;
+        opacity: 1 !important;
+    }
+
+    /* Plain text from st.write / st.markdown — but NOT inside our custom .row-card boxes */
+    .stMarkdown p, .stMarkdown li, .stMarkdown span,
+    .stText, [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li {
+        color: #2A2A2A !important;
+        -webkit-text-fill-color: #2A2A2A !important;
+        opacity: 1 !important;
+    }
+
+    /* ── Multiselect: container + tags + dropdown + input ─ */
+    .stMultiSelect [data-baseweb="select"] > div {
+        background: #FFFFFF !important;
+        border: 1px solid #DDD7CB !important;
+        min-height: 44px !important;
+    }
+    .stMultiSelect [data-baseweb="select"] * {
+        color: #2A2A2A !important;
+        -webkit-text-fill-color: #2A2A2A !important;
+    }
+    .stMultiSelect [data-baseweb="tag"] {
+        background-color: #FBEFD9 !important;
+        border: 1px solid #F1D9A8 !important;
+    }
+    .stMultiSelect [data-baseweb="tag"] span,
+    .stMultiSelect [data-baseweb="tag"] * {
+        color: #6B4A0E !important;
+        -webkit-text-fill-color: #6B4A0E !important;
+        font-weight: 600 !important;
+        font-size: 13px !important;
+    }
+    .stMultiSelect input {
+        color: #2A2A2A !important;
+        -webkit-text-fill-color: #2A2A2A !important;
+    }
+    .stMultiSelect [data-baseweb="select"] [class*="placeholder"],
+    .stMultiSelect [data-baseweb="select"] [class*="placeholder"] * {
+        color: #6B6B6B !important;
+        -webkit-text-fill-color: #6B6B6B !important;
+        opacity: 1 !important;
+    }
+
+    /* ⚠️ CRITICAL: BaseWeb popover renders OUTSIDE the widget tree
+       (portal to body) — force light background on all dropdown surfaces */
+    [data-baseweb="popover"],
+    [data-baseweb="popover"] > div,
+    [data-baseweb="popover"] [role="listbox"],
+    [data-baseweb="menu"],
+    [data-baseweb="menu"] ul,
+    [role="listbox"],
+    div[data-baseweb="menu"] {
+        background-color: #FFFFFF !important;
+        background: #FFFFFF !important;
+        border: 1px solid #DDD7CB !important;
+        border-radius: 10px !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08) !important;
+    }
+    [data-baseweb="popover"] *,
+    [data-baseweb="menu"] *,
+    [role="listbox"] *,
+    [role="option"],
+    [role="option"] * {
+        color: #1A1A1A !important;
+        -webkit-text-fill-color: #1A1A1A !important;
+        background-color: transparent !important;
+        opacity: 1 !important;
+    }
+    [role="option"] {
+        padding: 8px 14px !important;
+        font-size: 14px !important;
+        cursor: pointer !important;
+    }
+    [role="option"]:hover {
+        background-color: #F8F6F1 !important;
+    }
+    [role="option"][aria-selected="true"] {
+        background-color: #FBEFD9 !important;
+    }
+    [role="option"][aria-selected="true"] * {
+        color: #6B4A0E !important;
+        -webkit-text-fill-color: #6B4A0E !important;
+        font-weight: 600 !important;
+    }
+
+    /* ── Toggle / Checkbox: label text beside the switch ── */
+    [data-testid="stCheckbox"],
+    [data-testid="stCheckbox"] *,
+    [data-baseweb="checkbox"] label,
+    [data-baseweb="checkbox"] label *,
+    .stCheckbox > label,
+    .stCheckbox > label > div {
+        color: #2A2A2A !important;
+        -webkit-text-fill-color: #2A2A2A !important;
+        font-size: 14px !important;
+        font-weight: 500 !important;
+        opacity: 1 !important;
+    }
+
+    /* ── Expander ──────────────────────────────────────── */
+    [data-testid="stExpander"] summary,
+    [data-testid="stExpander"] summary *,
+    [data-testid="stExpander"] p,
+    .streamlit-expanderHeader,
+    .streamlit-expanderHeader * {
+        color: #2A2A2A !important;
+        -webkit-text-fill-color: #2A2A2A !important;
+        font-weight: 500 !important;
+        opacity: 1 !important;
+    }
+
+    /* ── Tabs labels ───────────────────────────────────── */
+    .stTabs [data-baseweb="tab"],
+    .stTabs [data-baseweb="tab"] * {
+        color: #5A5A5A !important;
+        -webkit-text-fill-color: #5A5A5A !important;
+        font-weight: 500 !important;
+    }
+    .stTabs [aria-selected="true"],
+    .stTabs [aria-selected="true"] * {
+        color: #C58A1A !important;
+        -webkit-text-fill-color: #C58A1A !important;
+    }
+
+    /* ── Progress text ─────────────────────────────────── */
+    [data-testid="stProgress"],
+    [data-testid="stProgress"] *,
+    [data-testid="stProgress"] p,
+    [data-testid="stProgress"] div {
+        color: #2A2A2A !important;
+        -webkit-text-fill-color: #2A2A2A !important;
+        font-weight: 500 !important;
+    }
+
+    /* ── Alert messages (info / success / warning / error) ─ */
+    [data-testid="stAlert"],
+    [data-testid="stAlert"] *,
+    [data-testid="stNotification"],
+    [data-testid="stNotification"] * {
+        color: #1A1A1A !important;
+        -webkit-text-fill-color: #1A1A1A !important;
+        opacity: 1 !important;
+    }
+
+    /* ── Sidebar specific overrides ─────────────────────── */
+    [data-testid="stSidebar"] *,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] .stCaption,
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+        color: #2A2A2A !important;
+        -webkit-text-fill-color: #2A2A2A !important;
+        opacity: 1 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+        color: #4A4A4A !important;
+        -webkit-text-fill-color: #4A4A4A !important;
+    }
+
+    /* ── Button text ───────────────────────────────────── */
+    .stButton > button,
+    .stButton > button * {
+        color: #2A2A2A !important;
+        -webkit-text-fill-color: #2A2A2A !important;
+    }
+    .stButton > button[kind="primary"],
+    .stButton > button[kind="primary"] * {
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
     }
 
     /* ── Hide streamlit chrome ───────────────────────── */
@@ -254,8 +523,11 @@ def _check_secrets() -> Optional[str]:
     else:
         if "sheet_id" not in secrets["sheet"]:
             missing.append("[sheet] → sheet_id")
+    if "drive" not in secrets:
+        # غير إجباري للقراءة، لكن مهم لتوليد الصور
+        pass
     if "openai" not in secrets:
-        # ليس إجباري للقراءة، فقط للـ Agent — نحذّر بدل ما نوقف
+        # غير إجباري للقراءة، فقط للـ Agent والتوليد
         pass
 
     if missing:
@@ -283,6 +555,9 @@ if _secrets_err:
 sheet_id        = "PASTE_YOUR_GOOGLE_SHEET_ID"
 worksheet_name  = "Sheet1"
 
+[drive]
+folder_name = "Moarjam_AlRiyadh_Images"
+
 [openai]
 api_key = "sk-..."
 
@@ -304,8 +579,9 @@ universe_domain             = "googleapis.com"
 """, language="toml")
         st.markdown(
             "**ملاحظات:**\n"
-            "- `[gcp_service_account]` يجي من ملف JSON اللي نزّلتيه من Google Cloud.\n"
-            "- `[openai]` اختياري — يلزم فقط لزر اقتراح برومت جديد.\n"
+            "- `[gcp_service_account]` يجي من ملف JSON من Google Cloud.\n"
+            "- نفس الـ client_email يجب أن يكون له Editor على الـ Sheet ومجلد Drive.\n"
+            "- `[openai]` و `[drive]` اختياريان لكن يلزمان لزر التوليد.\n"
             "- بعد التعديل، أعيدي تشغيل التطبيق."
         )
     st.stop()
@@ -521,36 +797,258 @@ def normalize_arabic(text: str) -> str:
 # Prompt Repair Agent
 # ═══════════════════════════════════════════════════════════════════════════
 @st.cache_resource
+def _read_openai_key_from_secrets() -> str:
+    """Read OpenAI API key from any of the supported secret layouts.
+    Returns the key string, or '' if not found.
+
+    Supported (in order):
+      1.  [openai]
+          api_key = "sk-..."
+      2.  OPENAI_API_KEY = "sk-..."           (flat, top-level)
+      3.  [openai]
+          OPENAI_API_KEY = "sk-..."           (mixed)
+      4.  Environment variable OPENAI_API_KEY
+    """
+    # 1) preferred section style
+    try:
+        v = st.secrets["openai"]["api_key"]
+        if v and str(v).strip():
+            return str(v).strip()
+    except Exception:
+        pass
+
+    # 2) flat top-level
+    try:
+        v = st.secrets["OPENAI_API_KEY"]
+        if v and str(v).strip():
+            return str(v).strip()
+    except Exception:
+        pass
+
+    # 3) mixed (section + uppercase key)
+    try:
+        v = st.secrets["openai"]["OPENAI_API_KEY"]
+        if v and str(v).strip():
+            return str(v).strip()
+    except Exception:
+        pass
+
+    # 4) environment variable fallback
+    v = os.environ.get("OPENAI_API_KEY", "")
+    if v and v.strip():
+        return v.strip()
+
+    return ""
+
+
 def get_openai_client() -> Optional["OpenAI"]:
     """Build the OpenAI client from secrets. Returns None if not configured."""
     if OpenAI is None:
         return None
-    try:
-        key = st.secrets["openai"]["api_key"]
-    except (KeyError, FileNotFoundError):
-        return None
+    key = _read_openai_key_from_secrets()
     if not key:
         return None
-    return OpenAI(api_key=key)
+    try:
+        return OpenAI(api_key=key)
+    except Exception:
+        return None
 
 
-AGENT_SYSTEM_PROMPT = """أنت Prompt Repair Agent لمشروع توليد صور قاموس عربي.
-مهمتك: تعديل برومت توليد صور موجود بناءً على ملاحظة مراجع بشري.
+def diagnose_openai_setup() -> str:
+    """Return a precise Arabic message explaining why OpenAI is unavailable."""
+    if OpenAI is None:
+        return (
+            "مكتبة openai غير مثبتة في البيئة. "
+            "شغّلي في الـ terminal: pip install openai"
+        )
+    try:
+        secrets_root = st.secrets
+    except (FileNotFoundError, Exception) as e:
+        return (
+            f"ملف secrets.toml غير موجود أو لا يمكن قراءته ({type(e).__name__}). "
+            f"تأكدي من وجوده في .streamlit/secrets.toml محلياً، "
+            f"أو في App Settings → Secrets على Streamlit Cloud."
+        )
 
-قيود صارمة لا تتجاوزها أبداً:
-- لا تغيّر معنى الكلمة العربية ولا نوع العنصر المُصوَّر.
-- لا تعيد تخيّل صورة مختلفة من الصفر.
-- ابنِ البرومت الجديد بناءً على البرومت الأصلي ثم عدّله بناءً على ملاحظة المراجع.
-- حافظ على القواعد الأساسية الثابتة:
-  • Clean studio product photography
-  • Pure neutral near-white seamless background (#FAFAFA), uniform, no warmth, no gradient, no vignette
-  • Single centered subject, photorealistic, ultra-sharp focus
-  • 1:1 square composition
-  • Soft diffused studio lighting, very subtle shadow
-  • Full object visible, not cropped, ample breathing room
-- احتفظ بقائمة الـ negatives: no text, no logos, no watermarks, no hands, no people, no cartoon, no clutter, no beige, no warm tone.
+    key = _read_openai_key_from_secrets()
+    if not key:
+        try:
+            present = list(secrets_root.keys())
+        except Exception:
+            present = []
+        return (
+            "لم أستطع العثور على مفتاح OpenAI في أي من الأشكال المدعومة. "
+            f"الأقسام/المفاتيح الموجودة حالياً: {present}. "
+            "أضيفي أحد الشكلين:\n"
+            "(أ) [openai]\\napi_key = \"sk-...\"\n"
+            "(ب) OPENAI_API_KEY = \"sk-...\"  (top-level)"
+        )
 
-أنتج برومت إنجليزي واحد فقط (نص متصل، بدون عناوين، بدون قوائم، بدون شرح)."""
+    if not key.startswith("sk-"):
+        return (
+            f"المفتاح موجود لكن لا يبدأ بـ sk- (يبدأ بـ '{key[:5]}...'). "
+            "تأكدي من نسخ المفتاح الصحيح من https://platform.openai.com/api-keys"
+        )
+
+    try:
+        OpenAI(api_key=key)
+        return "كل شيء يبدو صحيحاً — أعيدي تشغيل Streamlit (Ctrl+C ثم streamlit run app.py)."
+    except Exception as e:
+        return f"فشل تهيئة OpenAI client رغم وجود المفتاح: {type(e).__name__}: {e}"
+
+
+AGENT_SYSTEM_PROMPT = """أنت Prompt Repair Agent محدود الصلاحية لمشروع توليد صور قاموس عربي.
+
+# مهمتك الوحيدة
+تأخذ برومت توليد صور موجود وتعدّله بناءً على ملاحظات منظَّمة من مراجع بشري.
+الناتج المتوقع: نص برومت إنجليزي واحد فقط (أو الكلمة INSUFFICIENT_NOTE)، بدون مقدمة ولا شرح.
+
+# المدخلات المنظَّمة التي ستصلك
+1. قائمة فئات مشاكل (مختارة من قائمة موحَّدة).
+2. نص حر اختياري بتفاصيل إضافية (≤200 حرف).
+3. نص حر اختياري بوصف الصورة المطلوبة (≤250 حرف).
+
+# دليل التعامل مع كل فئة مشكلة
+- "الخلفية غير صحيحة" → أعِد التشديد على #FAFAFA seamless background, no beige, no gradient.
+- "الزاوية خاطئة" → استخدم وصف المراجع لتحديد الزاوية (front view / side view / three-quarter view / top-down view).
+- "الشكل غير دقيق" → استخدم وصف المراجع البصري لإعادة وصف العنصر بشكل أدق (الأبعاد، النسب، الأجزاء).
+- "الإضاءة سيئة" → اضبط "soft diffused studio lighting from upper-left, very subtle shadow".
+- "الألوان غير مناسبة" → استخدم الألوان المذكورة في التعريف العربي أو في وصف المراجع، بدون اختراع.
+- "التفاصيل ناقصة" → أضف العناصر المذكورة في وصف المراجع (مثل: عدد الخطاطيف، طول العمود، نوع القاعدة).
+- "الصورة مقصوصة" → شدّد على "full object visible, not cropped, ample breathing room around subject".
+- "غير ذلك" → عالج المشكلة كما هي مذكورة في النص الحر.
+
+# قيود صارمة لا تتجاوزها أبداً
+- مُحرّم تماماً تغيير معنى الكلمة العربية أو نوع العنصر المُصوَّر.
+- مُحرّم اختراع عنصر جديد أو إضافة سياق أو تفاصيل غير موجودة في التعريف العربي أو وصف المراجع.
+- ابدأ من البرومت الأصلي حرفياً، وعدّل فقط الجوانب المرتبطة بفئات المشاكل المختارة.
+- لا تحوّل الأسلوب إلى رسم/كرتون/illustration/3D-render/painting.
+- لا تضف نصوصاً على الصورة، شعارات، علامات مائية، أيدي، أو أشخاص.
+
+# قواعد المحافظة (Conservative Editing — مهم جداً)
+- التعديل يجب أن يكون **محدداً**: لا تعيد كتابة البرومت من الصفر.
+- احتفظ بكل العبارات الأصلية التي لم يذكرها المراجع، **حرفياً**.
+- استخدم وصف المراجع (visual_note) **كنص مرجعي مباشر**، لا تُعِد تفسيره أو توسيعه.
+  مثلاً: لو قال "شماعة سوداء بـ٦ خطاطيف"، اكتب حرفياً "black coat hanger with exactly 6 hooks"
+  ولا تضف ألواناً أو زخارف أو سياقاً لم يذكره.
+- استخدم object_description كأقوى مرجع للشكل الصحيح للعنصر.
+- إذا تعارضت ملاحظة المراجع مع object_description في **نوع** العنصر، تجاهل ملاحظة المراجع وأرجع INSUFFICIENT_NOTE.
+- لا تُضِف صفات تجميلية ("beautiful", "elegant", "stylish") لم يطلبها المراجع.
+- لا تُضِف عناصر بيئية (طاولة، رف، خلفية مزخرفة) — البرومت كلّه قائم على #FAFAFA فقط.
+- التغيير الأصغر يكفي. لا تعيد صياغة فضفاضة.
+
+# قواعد ثابتة يجب أن تبقى موجودة في البرومت الجديد
+- Clean studio product photography.
+- Pure neutral near-white seamless background (exactly #FAFAFA), uniform, no warmth, no gradient, no vignette.
+- Single centered subject, photorealistic, ultra-sharp focus.
+- 1:1 square composition.
+- Soft diffused studio lighting, very subtle natural shadow.
+- Full object visible, not cropped, ample breathing room.
+- Negative constraints: no text, no logos, no watermarks, no hands, no people, no cartoon, no illustration style, no clutter, no beige background, no warm yellow tint.
+
+# في حالة عدم الكفاية
+أرجع كلمة واحدة: INSUFFICIENT_NOTE
+إذا تحقق أيٌّ مما يلي:
+- قائمة فئات المشاكل فارغة، والنصوص الحرة فارغة أو غامضة جداً ("سيئة"، "ما تعجبني").
+- المراجع يطلب تغيير العنصر المُصوَّر نفسه (مثلاً يطلب صورة شيء مختلف عن الكلمة).
+- الملاحظة تتعارض مع التعريف العربي.
+
+# الناتج
+نص برومت إنجليزي واحد متصل (أو الكلمة INSUFFICIENT_NOTE). بدون عناوين، بدون قوائم، بدون JSON، بدون شرح."""
+
+
+def _normalize_for_compare(s: str) -> str:
+    """Normalize for sanity checks: lowercase, no punctuation, no diacritics."""
+    s = normalize_arabic(s or "").lower()
+    return re.sub(r"[^\w\u0600-\u06FF\s]", " ", s)
+
+
+def validate_regenerated_prompt(
+    new_prompt: str,
+    english_term: str,
+    object_description: str,
+    word_clean: str,
+    reviewer_visual_note: str,
+) -> Tuple[bool, str]:
+    """
+    Defensive checks on the agent's output. Returns (ok, repair_note).
+    Returns (False, reason) if the prompt looks like a hallucination.
+    """
+    if not new_prompt or not new_prompt.strip():
+        return False, "البرومت الناتج فارغ."
+
+    if new_prompt.strip().upper() == "INSUFFICIENT_NOTE":
+        return False, "الإيجنت أعلن أن ملاحظة المراجع غير كافية. الرجاء توضيح ملاحظتك."
+
+    np_norm = _normalize_for_compare(new_prompt)
+
+    # 1) Must still reference the subject (english_term OR Arabic word OR description noun)
+    anchors = []
+    if english_term:
+        anchors.extend(english_term.lower().split()[:4])
+    if word_clean:
+        anchors.append(normalize_arabic(word_clean))
+    if object_description:
+        # first 6 tokens of the description are the noun + adjectives
+        anchors.extend(object_description.lower().split()[:6])
+    anchors = [a for a in anchors if a and len(a) > 2]
+
+    if anchors and not any(a in np_norm for a in anchors):
+        return False, (
+            "البرومت الجديد لا يحتوي على أي مرجع للكلمة أو الترجمة أو الوصف "
+            "(احتمال اختراع موضوع مختلف)."
+        )
+
+    # 2) Must mention the locked-in style anchors
+    required_phrases = ["#FAFAFA", "photorealistic"]
+    missing = [p for p in required_phrases if p.lower() not in new_prompt.lower()]
+    if missing:
+        return False, f"البرومت الجديد لا يذكر قواعد الأساس: {missing}"
+
+    # 3) Must NOT contain illustration/cartoon style words
+    forbidden = ["cartoon", "anime", "illustration style", "painting style",
+                  "watercolor", "3d render", "low poly"]
+    for f in forbidden:
+        if f in new_prompt.lower():
+            return False, f"البرومت الجديد يحتوي على أسلوب ممنوع: '{f}'."
+
+    # 4) If reviewer left a visual note, prompt should reflect at least one keyword
+    rv_note = (reviewer_visual_note or "").strip()
+    if rv_note and len(rv_note) > 8:
+        rv_norm = _normalize_for_compare(rv_note)
+        # extract distinctive words (>=3 chars) from the note
+        note_tokens = [t for t in rv_norm.split() if len(t) >= 3]
+        if note_tokens and not any(t in np_norm for t in note_tokens):
+            return False, "البرومت الجديد لا يعكس ملاحظة المراجع البصرية."
+
+    return True, "passed validation"
+
+
+def display_word(row) -> str:
+    """
+    Return the word to display in the UI:
+      - nonDiacriticsLemma if available
+      - else: lemma with diacritics removed
+    Original sheet values are NOT modified.
+    """
+    nd = str(row.get(COL_NONDIAC, "") or "").strip()
+    if nd:
+        return nd
+    lemma = str(row.get(COL_LEMMA, "") or "").strip()
+    return remove_diacritics_only(lemma)
+
+
+def remove_diacritics_only(text: str) -> str:
+    """Remove tashkeel only — without letter unification (preserves أ إ ى ة)."""
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFC", str(text))
+    text = _ARABIC_DIACRITICS.sub("", text)
+    text = text.replace(_TATWEEL, "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+
 
 
 def run_prompt_repair_agent(
@@ -562,14 +1060,17 @@ def run_prompt_repair_agent(
     negative_prompt: str,
     rejection_reason: str,
     reviewer_visual_note: str,
+    issues: Optional[List[str]] = None,
 ) -> str:
-    """يستدعي gpt-4o-mini ويرجع regenerated_prompt واحد كنص."""
+    """يستدعي gpt-4o-mini ويرجع regenerated_prompt واحد كنص.
+    يقبل قائمة issues منظَّمة (من multiselect) بالإضافة للنصوص الحرة."""
     client = get_openai_client()
     if client is None:
-        raise RuntimeError(
-            "مفتاح OpenAI غير مُعَدّ. أضيفي في secrets.toml قسم [openai] "
-            "وفيه api_key = \"sk-...\""
-        )
+        raise RuntimeError(diagnose_openai_setup())
+
+    issues_block = "(لم تُحدَّد فئات)"
+    if issues:
+        issues_block = "\n".join(f"- {x}" for x in issues)
 
     user_msg = f"""## معلومات الصف
 
@@ -586,15 +1087,22 @@ def run_prompt_repair_agent(
 
 {negative_prompt or "(غير محدد)"}
 
-## ملاحظات المراجع
+## ملاحظات المراجع — مدخلات منظَّمة
 
-- سبب الرفض: {rejection_reason or "(لم يُذكر)"}
-- تصوّر المراجع للصورة المطلوبة: {reviewer_visual_note or "(لم يُذكر)"}
+### فئات المشاكل المختارة من القائمة:
+{issues_block}
+
+### تفاصيل إضافية (نص حر، اختياري):
+{rejection_reason or "(لم يُذكر)"}
+
+### تصوّر المراجع للصورة المطلوبة (نص حر، اختياري):
+{reviewer_visual_note or "(لم يُذكر)"}
 
 ## المطلوب
 
-أعطني نسخة محسَّنة من البرومت تعالج ملاحظات المراجع، مع الحفاظ على معنى الكلمة وكل القواعد الأساسية.
-ردّ بنص البرومت الجديد فقط، بدون أي شرح أو عناوين."""
+أعطني نسخة محسَّنة من البرومت تعالج تحديداً الفئات المختارة + الملاحظات،
+مع الحفاظ على معنى الكلمة وكل القواعد الثابتة.
+ردّ بنص البرومت الجديد فقط، أو INSUFFICIENT_NOTE — لا شيء آخر."""
 
     resp = client.chat.completions.create(
         model=AGENT_MODEL,
@@ -605,6 +1113,439 @@ def run_prompt_repair_agent(
         ],
     )
     return (resp.choices[0].message.content or "").strip()
+
+
+def propose_clarification_question(
+    repair_note: str,
+    issues: List[str],
+    reason: str,
+    visual_note: str,
+) -> str:
+    """Build ONE targeted Arabic question to show the reviewer when the agent's
+    output failed validation or returned INSUFFICIENT_NOTE."""
+    rn = (repair_note or "").lower()
+
+    if "insufficient" in rn or "غير كافية" in repair_note:
+        if not issues and not reason and not visual_note:
+            return ("لم تُحدِّدي أي مشكلة. اختاري على الأقل بنداً واحداً "
+                    "من قائمة المشاكل، أو اكتبي وصفاً موجزاً للصورة المطلوبة.")
+        if not visual_note:
+            return ("اختياراتك واضحة لكن نحتاج وصفاً بصرياً موجزاً "
+                    "للصورة المطلوبة (مثال: «شماعة سوداء بقاعدة دائرية و٦ خطاطيف»).")
+        return ("ملاحظتك ما زالت غامضة. أعطينا تفصيلاً ملموساً (لون/عدد/شكل) "
+                "بدلاً من وصف عام.")
+
+    if "البرومت الناتج فارغ" in repair_note:
+        return "حدث خطأ تقني. أعيدي المحاولة بعد لحظات."
+
+    if "ملاحظة المراجع البصرية" in repair_note:
+        return ("ما اللون أو الشكل أو الزاوية المطلوبة بالضبط؟ "
+                "اكتبيها بإيجاز في سطرين على الأكثر.")
+
+    if "أسلوب ممنوع" in repair_note:
+        return ("وصفك يقترب من أسلوب رسم/كرتون. نريد صورة فوتوغرافية واقعية. "
+                "أعيدي صياغة الملاحظة بمصطلحات فوتوغرافية.")
+
+    if "لا يحتوي على أي مرجع" in repair_note:
+        return ("ملاحظتك ابتعدت عن الكلمة الأصلية. "
+                "ركّزي على تعديل الصورة الحالية لا استبدالها بشيء مختلف.")
+
+    if "قواعد الأساس" in repair_note:
+        return "حدث خطأ في توليد البرومت. أعيدي المحاولة."
+
+    return f"يحتاج توضيحاً: {repair_note}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Image Generation (gpt-image-1) + Google Drive Upload
+# ═══════════════════════════════════════════════════════════════════════════
+import base64
+import io
+
+def generate_image_bytes(prompt: str, quality: Optional[str] = None) -> Tuple[bool, bytes, str]:
+    """
+    Generate one image using gpt-image-1. Returns (ok, png_bytes, error_msg).
+    quality: "low" | "medium" | "high" — defaults to IMAGE_QUALITY (medium).
+    """
+    client = get_openai_client()
+    if client is None:
+        return False, b"", "OpenAI client غير مُعَدّ."
+
+    use_quality = quality or IMAGE_QUALITY
+    try:
+        resp = client.images.generate(
+            model=IMAGE_MODEL,
+            prompt=prompt,
+            size=IMAGE_SIZE,
+            quality=use_quality,
+            n=1,
+        )
+        b64 = getattr(resp.data[0], "b64_json", None)
+        if not b64:
+            return False, b"", "API لم يُرجع b64_json."
+        return True, base64.b64decode(b64), ""
+    except Exception as e:
+        return False, b"", f"{type(e).__name__}: {e}"
+
+
+@st.cache_resource
+def get_drive_service():
+    """Build a Google Drive v3 service from the same service-account secrets."""
+    try:
+        from googleapiclient.discovery import build
+    except ImportError:
+        return None, "مكتبة google-api-python-client غير مُثبَّتة."
+    try:
+        creds_info = dict(st.secrets["gcp_service_account"])
+    except (KeyError, FileNotFoundError):
+        return None, "secrets يفتقد [gcp_service_account]."
+    drive_scopes = [
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(creds_info, scopes=drive_scopes)
+    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    return service, None
+
+
+def find_drive_folder_id(folder_name: str) -> Tuple[Optional[str], str]:
+    """
+    Look up the Drive folder ID by name. Service account must have access.
+    Returns (folder_id, error_msg). If multiple folders match, returns error.
+    """
+    service, err = get_drive_service()
+    if service is None:
+        return None, err
+
+    q = (
+        f"name = '{folder_name}' and "
+        f"mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    )
+    try:
+        result = service.files().list(
+            q=q, fields="files(id, name, owners)",
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute()
+    except Exception as e:
+        return None, f"فشل البحث عن المجلد: {type(e).__name__}: {e}"
+
+    files = result.get("files", [])
+    if not files:
+        return None, (
+            f"لم يُعثَر على مجلد باسم '{folder_name}'. "
+            "تأكدي أن الـ service account له صلاحية Editor على المجلد."
+        )
+    if len(files) > 1:
+        ids = ", ".join(f["id"] for f in files)
+        return None, (
+            f"وجدت {len(files)} مجلدات بنفس الاسم. "
+            f"أضيفي في secrets [drive] → folder_id بدل folder_name. IDs: {ids}"
+        )
+    return files[0]["id"], ""
+
+
+def upload_image_to_drive(
+    image_bytes: bytes, filename: str
+) -> Tuple[bool, str, str, str]:
+    """
+    Upload bytes as a PNG to the configured Drive folder.
+    Returns (ok, drive_file_id, public_url, error_msg).
+    """
+    service, err = get_drive_service()
+    if service is None:
+        return False, "", "", err
+
+    # Folder ID: prefer secrets[drive][folder_id], else look up by folder_name
+    try:
+        drive_cfg = st.secrets["drive"]
+    except (KeyError, FileNotFoundError):
+        return False, "", "", "secrets يفتقد قسم [drive]."
+
+    folder_id = drive_cfg.get("folder_id", "").strip() if hasattr(drive_cfg, "get") else ""
+    if not folder_id:
+        folder_name = drive_cfg.get("folder_name", "Moarjam_AlRiyadh_Images") if hasattr(drive_cfg, "get") else "Moarjam_AlRiyadh_Images"
+        folder_id, err = find_drive_folder_id(folder_name)
+        if not folder_id:
+            return False, "", "", err
+
+    try:
+        from googleapiclient.http import MediaIoBaseUpload
+        media = MediaIoBaseUpload(io.BytesIO(image_bytes), mimetype="image/png")
+        metadata = {"name": filename, "parents": [folder_id]}
+        file = service.files().create(
+            body=metadata, media_body=media, fields="id",
+            supportsAllDrives=True,
+        ).execute()
+        file_id = file["id"]
+
+        # Make link-shareable
+        try:
+            service.permissions().create(
+                fileId=file_id, body={"type": "anyone", "role": "reader"},
+                supportsAllDrives=True,
+            ).execute()
+        except Exception:
+            pass
+
+        url = f"https://drive.google.com/uc?id={file_id}"
+        return True, file_id, url, ""
+    except Exception as e:
+        return False, "", "", f"{type(e).__name__}: {e}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Unified regeneration pipeline (one-button, end-to-end)
+# ═══════════════════════════════════════════════════════════════════════════
+def run_regeneration_pipeline(
+    row: pd.Series,
+    issues: List[str],
+    reason: str,
+    visual_note: str,
+    test_mode: bool,
+    fast_mode: bool,
+    reviewer_name: str,
+) -> Tuple[bool, str, str]:
+    """
+    Full background pipeline:
+      1. Save rejection metadata.
+      2. Run agent → English prompt (not shown to user).
+      3. Validate defensively.
+      4. If invalid → save note + return (False, clarification_q, "").
+      5. If valid → generate image with gpt-image-1.
+      6. Upload to Drive.
+      7. Update Sheet (image_url or test_* depending on test_mode).
+    Returns (success, message_or_clarification, new_image_url).
+
+    On ANY failure after the rejection metadata is saved:
+      - image_url is NEVER touched.
+      - The full error is persisted to `regeneration_note` (or
+        `test_regeneration_note` in test mode) and shown via st.error.
+    """
+    uid_val          = str(row.get(COL_UID, ""))
+    filename_val     = str(row.get(COL_FILENAME, ""))
+    row_number_val   = str(row.get(COL_ROW_NUMBER, ""))
+
+    # Pick the note column based on mode (per spec — never change image_url on failure)
+    err_note_col = COL_TEST_NOTE if test_mode else "regeneration_note"
+
+    def _persist_error(err_msg: str) -> None:
+        """Write the error message to the right note column. Never touches image_url."""
+        try:
+            update_review_in_sheet(
+                image_uid=uid_val,
+                image_filename=filename_val,
+                sheet_row_number=row_number_val,
+                updates={
+                    err_note_col:                  err_msg[:480],
+                    "regeneration_request_status": "failed",
+                },
+            )
+        except Exception:
+            pass  # logging only — must not raise from inside an error handler
+
+    progress = st.progress(0, text="💾 حفظ ملاحظات المراجع في الشيت...")
+
+    # — Step 1: persist rejection metadata —
+    combined_reason_parts = list(issues)
+    if reason.strip():
+        combined_reason_parts.append(reason.strip())
+    combined_reason = " | ".join(combined_reason_parts) or "(لم يُذكر)"
+
+    try:
+        update_review_in_sheet(
+            image_uid=uid_val,
+            image_filename=filename_val,
+            sheet_row_number=row_number_val,
+            updates={
+                "review_status":               ST_REJECTED,
+                "review_decision":             "rejected",
+                "rejection_reason":            combined_reason,
+                "reviewer_visual_note":        visual_note.strip(),
+                "needs_regeneration":          "yes",
+                "regeneration_request_status": "in_progress",
+                "reviewer_name":               reviewer_name,
+                "reviewed_at":                 now_riyadh_iso(),
+                "approved_image_url":          "",
+            },
+        )
+    except Exception as e:
+        err = f"فشل حفظ ملاحظات الرفض: {type(e).__name__}: {e}"
+        progress.empty()
+        st.error(err)
+        # nothing to persist yet — sheet write itself failed
+        return False, "", ""
+
+    # ── Step 2: agent — build new prompt ──────────────────────────────────
+    progress.progress(10, text="🤖 بدأ إنشاء البرومت...")
+    try:
+        english = str(row.get(COL_ENGLISH) or row.get(COL_TRANSLATION) or "")
+        new_prompt = run_prompt_repair_agent(
+            word=str(row.get(COL_LEMMA, "")),
+            definition_ar=str(row.get(COL_DEFINITION, "")),
+            translation=english,
+            object_description=str(row.get(COL_OBJ_DESC, "")),
+            image_prompt=str(row.get(COL_PROMPT, "")),
+            negative_prompt=str(row.get(COL_NEG_PROMPT, "")),
+            rejection_reason=reason.strip(),
+            reviewer_visual_note=visual_note.strip(),
+            issues=issues,
+        )
+    except Exception as e:
+        err = f"فشل إنشاء البرومت (الإيجنت): {type(e).__name__}: {e}"
+        _persist_error(err)
+        progress.empty()
+        st.error(err)
+        return False, "", ""
+
+    progress.progress(25, text="✅ تم إنشاء البرومت — جاري التحقق منه...")
+
+    # ── Step 3: defensive validation ──────────────────────────────────────
+    ok, repair_note = validate_regenerated_prompt(
+        new_prompt=new_prompt,
+        english_term=english,
+        object_description=str(row.get(COL_OBJ_DESC, "")),
+        word_clean=display_word(row),
+        reviewer_visual_note=visual_note.strip(),
+    )
+
+    if not ok:
+        # save the failure note (no prompt) and return a clarification question
+        try:
+            update_review_in_sheet(
+                image_uid=uid_val,
+                image_filename=filename_val,
+                sheet_row_number=row_number_val,
+                updates={
+                    COL_PROMPT_REPAIR_STATUS:      "needs_clarification",
+                    COL_PROMPT_REPAIR_NOTE:        repair_note,
+                    "regeneration_request_status": "needs_clarification",
+                },
+            )
+        except Exception:
+            pass
+        progress.empty()
+        clarification = propose_clarification_question(
+            repair_note=repair_note,
+            issues=issues,
+            reason=reason.strip(),
+            visual_note=visual_note.strip(),
+        )
+        # image_url not touched — by design
+        return False, clarification, ""
+
+    # ── Step 4: save the validated prompt (background, hidden from UI) ────
+    try:
+        update_review_in_sheet(
+            image_uid=uid_val,
+            image_filename=filename_val,
+            sheet_row_number=row_number_val,
+            updates={
+                COL_REGEN_PROMPT:          new_prompt,
+                COL_PROMPT_REPAIR_STATUS:  "ok",
+                COL_PROMPT_REPAIR_NOTE:    repair_note,
+            },
+        )
+    except Exception:
+        pass  # non-fatal — continue
+
+    quality = "low" if fast_mode else IMAGE_QUALITY
+
+    # ── Step 5: generate image ────────────────────────────────────────────
+    progress.progress(40, text=f"🎨 بدأ توليد الصورة من OpenAI (جودة: {quality})...")
+    gen_ok, img_bytes, err = generate_image_bytes(new_prompt, quality=quality)
+    if not gen_ok:
+        msg = f"فشل توليد الصورة من OpenAI: {err}"
+        _persist_error(msg)
+        progress.empty()
+        st.error(msg)
+        return False, "", ""
+
+    progress.progress(65, text=f"✅ تم استلام الصورة من OpenAI ({len(img_bytes)} bytes)")
+
+    # ── Step 6: upload to Drive ───────────────────────────────────────────
+    progress.progress(72, text="☁️ بدأ رفع الصورة إلى Google Drive...")
+    base_fname = filename_val or "image.png"
+    ts = datetime.now(RIYADH_TZ).strftime("%Y%m%d_%H%M%S")
+    suffix = "_test" if test_mode else "_regen"
+    if base_fname.endswith(".png"):
+        new_fname = base_fname.replace(".png", f"{suffix}_{ts}.png")
+    else:
+        new_fname = f"{base_fname}{suffix}_{ts}.png"
+
+    up_ok, file_id, new_url, up_err = upload_image_to_drive(img_bytes, new_fname)
+    if not up_ok:
+        msg = f"فشل رفع الصورة إلى Drive: {up_err}"
+        _persist_error(msg)
+        progress.empty()
+        st.error(msg)
+        return False, "", ""
+
+    progress.progress(85, text="✅ تم رفع الصورة إلى Drive — جاري تحديث الشيت...")
+
+    # ── Step 7: write final state ─────────────────────────────────────────
+    now_ts = now_riyadh_iso()
+    st.session_state["gen_count"] = st.session_state.get("gen_count", 0) + 1
+
+    if test_mode:
+        # ⚠️ image_url is NOT touched in Test Mode (per spec).
+        updates = {
+            COL_TEST_PROMPT:               new_prompt,
+            COL_TEST_IMG_URL:              new_url,
+            COL_TEST_REGEN_AT:             now_ts,
+            COL_TEST_NOTE:                 f"test_generation; file_id={file_id}; quality={quality}",
+            "regeneration_request_status": "test_completed",
+        }
+    else:
+        prev_url = str(row.get(COL_IMAGE_URL, ""))
+        old_count = str(row.get(COL_REGEN_COUNT, "0") or "0")
+        try:
+            new_count = int(old_count) + 1
+        except ValueError:
+            new_count = 1
+        history_line = (
+            f"[{now_ts}] regenerated → {new_url} "
+            f"(prev: {prev_url[:60]}; quality: {quality})"
+        )
+        old_history = str(row.get(COL_REGEN_HISTORY, ""))
+        new_history = (old_history + "\n" + history_line).strip()
+        updates = {
+            COL_IMAGE_URL:                 new_url,
+            COL_PREVIOUS_URL:              prev_url,
+            COL_REGEN_COUNT:               str(new_count),
+            COL_LAST_REGEN_AT:             now_ts,
+            COL_REGEN_HISTORY:             new_history,
+            "regeneration_request_status": "completed",
+            "needs_regeneration":          "no",
+            "review_status":               ST_PENDING,
+            "review_decision":             "",
+            # clear any previous failure note for this row
+            "regeneration_note":           "",
+        }
+
+    try:
+        update_review_in_sheet(
+            image_uid=uid_val,
+            image_filename=filename_val,
+            sheet_row_number=row_number_val,
+            updates=updates,
+        )
+    except Exception as e:
+        msg = f"تم التوليد ورُفعت الصورة لكن فشل تحديث الشيت: {type(e).__name__}: {e}"
+        _persist_error(msg)
+        progress.empty()
+        st.error(msg)
+        return False, "", new_url
+
+    progress.progress(95, text="💾 تم تحديث الشيت")
+    progress.progress(100, text="✅ تم عرض النتيجة")
+    progress.empty()
+
+    msg = (
+        "✅ تم التوليد. النتيجة محفوظة في أعمدة test_* (الأصل لم يُلمَس)."
+        if test_mode else
+        "✅ تم استبدال الصورة بالنسخة الجديدة وحفظ السجل في الشيت."
+    )
+    return True, msg, new_url
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -755,28 +1696,16 @@ def render_detail(row: pd.Series):
 
         st.caption(str(row.get(COL_FILENAME, "")))
 
-        st.markdown(
-            f'<div class="row-card" style="margin-top:14px;">'
-            f'<div style="font-size:12px;color:#7A7A7A;margin-bottom:6px;">'
-            f'البرومت المستخدم'
-            f'</div>'
-            f'<div style="font-family: monospace; font-size:13px; '
-            f'background:#FAF8F4; padding:10px; border-radius:8px; '
-            f'white-space: pre-wrap; direction:ltr; text-align:left;">'
-            f'{str(row.get(COL_PROMPT, "")).strip() or "—"}'
-            f'</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+        # ── (Removed) "البرومت المستخدم" block —
+        # reviewers should not see the English prompt; it remains saved in
+        # the sheet for auditing only.
 
     # ── Info + actions side ─────────────────────────────────────────────
     with col_info:
+        word_for_display = display_word(row)
         st.markdown(
             f'<div class="row-card">'
-            f'<div style="font-size:28px;font-weight:700;">{row.get(COL_LEMMA, "—")}</div>'
-            f'<div style="color:#7A7A7A;font-size:13px;margin-top:4px;">'
-            f'{row.get(COL_NONDIAC, "")}'
-            f'</div>'
+            f'<div style="font-size:28px;font-weight:700;">{word_for_display}</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -817,9 +1746,6 @@ def render_detail(row: pd.Series):
         # ── Review action panel ─────────────────────────────────────────
         st.markdown("### إجراء المراجعة")
 
-        # ── Review action panel ─────────────────────────────────────────
-        st.markdown("### إجراء المراجعة")
-
         tab_approve, tab_reject = st.tabs(["✅ اعتماد الصورة", "❌ رفض / إعادة توليد"])
 
         with tab_approve:
@@ -849,106 +1775,186 @@ def render_detail(row: pd.Series):
                     st.error(f"فشل الحفظ: {type(e).__name__}: {e}")
 
         with tab_reject:
-            st.write("ارفضي الصورة واطلبي إعادة توليد. اشرحي الملاحظات بدقة.")
-            reason = st.text_area(
-                "سبب الرفض",
-                value="",
-                placeholder="مثال: الخلفية بيج، الصورة مقصوصة، اللون غير مناسب...",
-                key="reject_reason",
+            uid_val = str(row.get(COL_UID, "") or row.get(COL_FILENAME, "") or "")
+
+            st.markdown(
+                '<div style="color:#2A2A2A;font-size:14px;font-weight:500;'
+                'margin:4px 0 8px 0;">'
+                'اختاري المشكلة من القائمة، وأضيفي وصفاً موجزاً اختيارياً للصورة المطلوبة.'
+                '</div>',
+                unsafe_allow_html=True,
             )
+
+            # ── 1) Structured issue picker (covers 80% of cases) ────────────
+            ISSUE_OPTIONS = [
+                "الخلفية غير صحيحة",
+                "الزاوية خاطئة",
+                "الشكل غير دقيق",
+                "الإضاءة سيئة",
+                "الألوان غير مناسبة",
+                "التفاصيل ناقصة",
+                "الصورة مقصوصة",
+                "غير ذلك",
+            ]
+            issues = st.multiselect(
+                "ما المشكلة في الصورة؟ (يمكن اختيار أكثر من واحدة)",
+                options=ISSUE_OPTIONS,
+                placeholder="اختاري واحدة أو أكثر…",
+                key=f"issues_{uid_val}",
+            )
+
+            # ── 2) ONE short free-text field (merged) ───────────────────────
             visual_note = st.text_area(
-                "تصوّر المراجع للصورة المطلوبة",
+                "وصف الصورة المطلوبة (اختياري) — سطران كحد أقصى",
                 value="",
-                placeholder="مثال: شماعة سوداء أرضية بقاعدة مستديرة، عمود رفيع، ٦ خطاطيف في الأعلى",
-                key="reject_note",
+                max_chars=250,
+                height=68,
+                placeholder="مثال: شماعة سوداء بقاعدة دائرية و٦ خطاطيف، خلفية بيضاء.",
+                key=f"reject_note_{uid_val}",
             )
+            # internal: reason kept for pipeline compatibility (empty if only multiselect used)
+            reason = ""
 
-            # ── Prompt Repair Agent ─────────────────────────────────────────
-            st.markdown("##### 🤖 اقتراح برومت جديد بناءً على ملاحظاتك")
-            st.caption(
-                "الإيجنت يقرأ ملاحظات الرفض ويقترح برومت جديد. "
-                "لا يولّد صورة — يحفظ الاقتراح في عمود `regenerated_prompt` فقط."
-            )
-
-            agent_key = f"agent_result_{row.get(COL_UID, '')}"
-
-            if st.button("✨ اقتراح برومت جديد",
-                         use_container_width=True, key="btn_agent"):
-                try:
-                    with st.spinner("جاري توليد الاقتراح..."):
-                        new_prompt = run_prompt_repair_agent(
-                            word=str(row.get(COL_LEMMA, "")),
-                            definition_ar=str(row.get(COL_DEFINITION, "")),
-                            translation=str(
-                                row.get(COL_ENGLISH) or row.get(COL_TRANSLATION) or ""
-                            ),
-                            object_description=str(row.get(COL_OBJ_DESC, "")),
-                            image_prompt=str(row.get(COL_PROMPT, "")),
-                            negative_prompt=str(row.get(COL_NEG_PROMPT, "")),
-                            rejection_reason=reason.strip(),
-                            reviewer_visual_note=visual_note.strip(),
-                        )
-                    st.session_state[agent_key] = new_prompt
-                    # احفظ مباشرة في الشيت
-                    update_review_in_sheet(
-                        image_uid=str(row.get(COL_UID, "")),
-                        image_filename=str(row.get(COL_FILENAME, "")),
-                        sheet_row_number=str(row.get(COL_ROW_NUMBER, "")),
-                        updates={COL_REGEN_PROMPT: new_prompt},
-                    )
-                    st.success("✅ تم توليد الاقتراح وحفظه في عمود regenerated_prompt.")
-                except Exception as e:
-                    st.error(f"فشل توليد الاقتراح: {type(e).__name__}: {e}")
-
-            # اعرض آخر اقتراح (من session أو من الشيت)
-            shown_prompt = (
-                st.session_state.get(agent_key)
-                or str(row.get(COL_REGEN_PROMPT, "")).strip()
-            )
-            if shown_prompt:
-                st.markdown(
-                    f'<div style="margin-top:10px;">'
-                    f'<div style="font-size:12px;color:#7A7A7A;margin-bottom:6px;">'
-                    f'البرومت المُقترَح (regenerated_prompt)'
-                    f'</div>'
-                    f'<div style="font-family:monospace;font-size:13px;'
-                    f'background:#FBFAF7;padding:12px;border:1px solid #ECE7DE;'
-                    f'border-radius:8px;white-space:pre-wrap;direction:ltr;'
-                    f'text-align:left;">{shown_prompt}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
+            # ── 3) Mode toggles ─────────────────────────────────────────────
+            col_t, col_f = st.columns(2)
+            with col_t:
+                test_mode = st.toggle(
+                    "🧪 Test Mode (لا يستبدل الصورة الأصلية)",
+                    value=TEST_MODE_DEFAULT,
+                    key=f"test_mode_{uid_val}",
+                    help="في Test Mode تُحفظ النتيجة في أعمدة test_* فقط.",
                 )
+            with col_f:
+                fast_mode = st.toggle(
+                    "⚡ توليد سريع (جودة أقل)",
+                    value=False,
+                    key=f"fast_mode_{uid_val}",
+                    help="quality=low — أسرع ~3 أضعاف، مناسب للتجارب.",
+                )
+
+            # ── 4) Session counter ──────────────────────────────────────────
+            session_count = st.session_state.get("gen_count", 0)
+            remaining = MAX_GENERATIONS_PER_SESSION - session_count
+            st.caption(
+                f"رصيد التوليد في الجلسة: "
+                f"{max(remaining, 0)} / {MAX_GENERATIONS_PER_SESSION}"
+            )
+            if 0 < remaining <= 2:
+                st.warning(f"⚠️ متبقي {remaining} توليدات فقط في هذه الجلسة.")
+            elif remaining <= 0:
+                st.error(
+                    "⛔ تجاوزتِ الحد الأقصى للجلسة. أعيدي تحميل الصفحة لإعادة العداد."
+                )
+
+            # ── 5) Pre-flight: must have at least one signal ────────────────
+            has_input = bool(issues) or bool(reason.strip()) or bool(visual_note.strip())
+            can_regen = has_input and remaining > 0
+
+            help_txt = None
+            if not has_input:
+                help_txt = "اختاري مشكلة واحدة على الأقل أو اكتبي وصفاً مختصراً."
+            elif remaining <= 0:
+                help_txt = "وصلتِ الحد الأقصى للجلسة."
+
+            # ── 6) Show pending clarification (if any from a previous run) ──
+            clar_key = f"clar_q_{uid_val}"
+            pending_q = st.session_state.get(clar_key, "")
+            if pending_q:
+                st.info(f"❓ **سؤال توضيحي:** {pending_q}")
+
+            # ── 7) THE single regenerate button ─────────────────────────────
+            label = "🔄 إعادة التوليد"
+            if test_mode:
+                label += " (Test Mode)"
+            else:
+                label += " — 🚨 استبدال الأصل"
+
+            if st.button(
+                label,
+                type="primary",
+                use_container_width=True,
+                disabled=not can_regen,
+                help=help_txt,
+                key=f"btn_regen_{uid_val}",
+            ):
+                success, message, new_url = run_regeneration_pipeline(
+                    row=row,
+                    issues=issues,
+                    reason=reason,
+                    visual_note=visual_note,
+                    test_mode=test_mode,
+                    fast_mode=fast_mode,
+                    reviewer_name=reviewer_name,
+                )
+
+                if success:
+                    # clear any old clarification
+                    st.session_state[clar_key] = ""
+                    st.success(message)
+                    if new_url:
+                        try:
+                            st.image(
+                                drive_thumbnail_url(new_url, width=600),
+                                caption="الصورة الجديدة",
+                                width=420,
+                            )
+                        except Exception:
+                            st.markdown(f"[فتح الصورة الجديدة]({new_url})")
+                    # delay-free rerun: let the user see the image first
+                    if st.button("🔄 تحديث الصفحة لعرض التغييرات",
+                                 key=f"refresh_{uid_val}"):
+                        st.rerun()
+                elif message:
+                    # Pipeline returned a clarification question (validation failed,
+                    # NOT a real error — those are already shown via st.error inside
+                    # the pipeline with empty message).
+                    st.session_state[clar_key] = message
+                    st.warning(f"❓ {message}")
+                else:
+                    # Real error — already displayed via st.error inside the pipeline.
+                    # Clear any stale clarification so we don't show old hints.
+                    st.session_state[clar_key] = ""
 
             st.divider()
 
-            # ── حفظ طلب الرفض / إعادة التوليد ──────────────────────────────
-            disabled = not reason.strip()
-            help_txt = "اكتبي سبب الرفض" if disabled else None
-
-            if st.button("💾 حفظ طلب الرفض / إعادة التوليد",
-                         use_container_width=True, disabled=disabled,
-                         help=help_txt, key="btn_reject"):
-                try:
-                    update_review_in_sheet(
-                        image_uid=str(row.get(COL_UID, "")),
-                        image_filename=str(row.get(COL_FILENAME, "")),
-                        sheet_row_number=str(row.get(COL_ROW_NUMBER, "")),
-                        updates={
-                            "review_status":               ST_REJECTED,
-                            "review_decision":             "rejected",
-                            "rejection_reason":            reason.strip(),
-                            "reviewer_visual_note":        visual_note.strip(),
-                            "needs_regeneration":          "yes",
-                            "regeneration_request_status": "pending",
-                            "reviewer_name":               reviewer_name,
-                            "reviewed_at":                 now_riyadh_iso(),
-                            "approved_image_url":          "",
-                        },
-                    )
-                    st.success("✅ تم حفظ طلب إعادة التوليد.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"فشل الحفظ: {type(e).__name__}: {e}")
+            # ── 8) Fallback: save rejection only (no generation) ────────────
+            with st.expander("حفظ طلب الرفض فقط بدون توليد الآن"):
+                st.caption(
+                    "لو ودك تحفظي الملاحظات دون أن تستهلكي توليداً الآن، "
+                    "استخدمي هذا الخيار. الصف يتحوّل لحالة «بانتظار إعادة التوليد»."
+                )
+                if st.button(
+                    "💾 حفظ الرفض فقط",
+                    use_container_width=True,
+                    disabled=not has_input,
+                    help=("اختاري مشكلة أو اكتبي ملاحظة." if not has_input else None),
+                    key=f"btn_save_only_{uid_val}",
+                ):
+                    combined_parts = list(issues)
+                    if reason.strip():
+                        combined_parts.append(reason.strip())
+                    combined = " | ".join(combined_parts) or "(لم يُذكر)"
+                    try:
+                        update_review_in_sheet(
+                            image_uid=str(row.get(COL_UID, "")),
+                            image_filename=str(row.get(COL_FILENAME, "")),
+                            sheet_row_number=str(row.get(COL_ROW_NUMBER, "")),
+                            updates={
+                                "review_status":               ST_REJECTED,
+                                "review_decision":             "rejected",
+                                "rejection_reason":            combined,
+                                "reviewer_visual_note":        visual_note.strip(),
+                                "needs_regeneration":          "yes",
+                                "regeneration_request_status": "pending",
+                                "reviewer_name":               reviewer_name,
+                                "reviewed_at":                 now_riyadh_iso(),
+                                "approved_image_url":          "",
+                            },
+                        )
+                        st.success("✅ تم حفظ طلب إعادة التوليد.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"فشل الحفظ: {type(e).__name__}: {e}")
 
 
 def render_table(df: pd.DataFrame):
@@ -989,7 +1995,7 @@ def render_table(df: pd.DataFrame):
         with cols[1]:
             st.markdown(
                 f'<div style="font-weight:600;font-size:16px;color:#2A2A2A;">'
-                f'{row.get(COL_LEMMA, "—")}</div>'
+                f'{display_word(row)}</div>'
                 f'<div style="font-family:monospace;font-size:11px;color:#9C9C9C;">'
                 f'#{row.get(COL_ROW_NUMBER, "")} · {row.get(COL_FILENAME, "")[:35]}'
                 f'</div>',
