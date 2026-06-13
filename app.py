@@ -1294,29 +1294,61 @@ def find_drive_folder_id(folder_name: str) -> Tuple[Optional[str], str]:
     return files[0]["id"], ""
 
 
+def auto_detect_drive_folder_from_row(row: pd.Series) -> Tuple[Optional[str], str]:
+    """Fallback when secrets[drive] is missing: derive the target folder from
+    the row's existing image_url by asking Drive API for that file's parents."""
+    image_url = str(row.get(COL_IMAGE_URL, "") or "")
+    m = re.search(r"(?:id=|/d/)([a-zA-Z0-9_\-]+)", image_url)
+    if not m:
+        return None, "تعذّر استخراج file_id من image_url لهذا الصف."
+    file_id = m.group(1)
+    service, err = get_drive_service()
+    if not service:
+        return None, err
+    try:
+        meta = service.files().get(
+            fileId=file_id, fields="parents", supportsAllDrives=True
+        ).execute()
+        parents = meta.get("parents") or []
+        if not parents:
+            return None, "ملف الصورة الأصلية ليس داخل أي مجلد."
+        return parents[0], ""
+    except Exception as e:
+        return None, f"فشل Drive API: {type(e).__name__}: {e}"
+
+
 def upload_image_to_drive(
-    image_bytes: bytes, filename: str
+    image_bytes: bytes,
+    filename: str,
+    folder_id_override: Optional[str] = None,
 ) -> Tuple[bool, str, str, str]:
     """
     Upload bytes as a PNG to the configured Drive folder.
     Returns (ok, drive_file_id, public_url, error_msg).
+    `folder_id_override` lets the caller pass a folder discovered at runtime
+    (e.g. by auto_detect_drive_folder_from_row) when secrets[drive] is absent.
     """
     service, err = get_drive_service()
     if service is None:
         return False, "", "", err
 
-    # Folder ID: prefer secrets[drive][folder_id], else look up by folder_name
-    try:
-        drive_cfg = st.secrets["drive"]
-    except (KeyError, FileNotFoundError):
-        return False, "", "", "secrets يفتقد قسم [drive]."
+    folder_id = (folder_id_override or "").strip()
 
-    folder_id = drive_cfg.get("folder_id", "").strip() if hasattr(drive_cfg, "get") else ""
+    # If no override, fall back to secrets[drive]
     if not folder_id:
-        folder_name = drive_cfg.get("folder_name", "Moarjam_AlRiyadh_Images") if hasattr(drive_cfg, "get") else "Moarjam_AlRiyadh_Images"
-        folder_id, err = find_drive_folder_id(folder_name)
+        try:
+            drive_cfg = st.secrets["drive"]
+        except (KeyError, FileNotFoundError):
+            return False, "", "", (
+                "تعذّر تحديد مجلد Drive: قسم [drive] غير موجود في secrets، "
+                "ولم يُمرَّر folder_id_override من المنادي."
+            )
+        folder_id = drive_cfg.get("folder_id", "").strip() if hasattr(drive_cfg, "get") else ""
         if not folder_id:
-            return False, "", "", err
+            folder_name = drive_cfg.get("folder_name", "Moarjam_AlRiyadh_Images") if hasattr(drive_cfg, "get") else "Moarjam_AlRiyadh_Images"
+            folder_id, err = find_drive_folder_id(folder_name)
+            if not folder_id:
+                return False, "", "", err
 
     try:
         from googleapiclient.http import MediaIoBaseUpload
@@ -1527,7 +1559,20 @@ def run_regeneration_pipeline(
     else:
         new_fname = f"{base_fname}{suffix}_{ts}.png"
 
+    # Try standard upload first; if it fails because [drive] is missing,
+    # try to derive the folder from the row's existing image_url.
     up_ok, file_id, new_url, up_err = upload_image_to_drive(img_bytes, new_fname)
+    if not up_ok and "[drive]" in up_err:
+        progress.progress(74, text="🔎 محاولة اكتشاف مجلد Drive تلقائياً من الصف...")
+        folder_id, det_err = auto_detect_drive_folder_from_row(row)
+        if folder_id:
+            up_ok, file_id, new_url, up_err = upload_image_to_drive(
+                img_bytes, new_fname, folder_id_override=folder_id
+            )
+        else:
+            up_err = (
+                f"{up_err} | الاكتشاف التلقائي للمجلد أيضاً فشل: {det_err}"
+            )
     if not up_ok:
         msg = f"فشل رفع الصورة إلى Drive: {up_err}"
         _persist_error(msg)
@@ -1535,19 +1580,85 @@ def run_regeneration_pipeline(
         st.error(msg)
         return False, "", ""
 
-    progress.progress(85, text="✅ تم رفع الصورة إلى Drive — جاري تحديث الشيت...")
+    progress.progress(88, text="✅ تم رفع الصورة إلى Drive — جاهزة للمراجعة")
 
-    # ── Step 7: write final state ─────────────────────────────────────────
+    # ── Step 7: save the validated prompt to the sheet ────────────────────
+    # IMPORTANT: image_url is NOT touched. We only persist the prompt + the
+    # candidate URL + status="pending_reviewer_approval". The reviewer must
+    # explicitly approve the new image before image_url is replaced.
     now_ts = now_riyadh_iso()
     st.session_state["gen_count"] = st.session_state.get("gen_count", 0) + 1
 
+    candidate_updates = {
+        COL_REGEN_PROMPT:              new_prompt,
+        COL_PROMPT_REPAIR_STATUS:      "ok",
+        COL_PROMPT_REPAIR_NOTE:        repair_note,
+        "regeneration_request_status": "pending_reviewer_approval",
+    }
     if test_mode:
-        # ⚠️ image_url is NOT touched in Test Mode (per spec).
+        candidate_updates[COL_TEST_NOTE] = (
+            f"candidate_awaiting_approval; file_id={file_id}; quality={quality}"
+        )
+
+    try:
+        update_review_in_sheet(
+            image_uid=uid_val,
+            image_filename=filename_val,
+            sheet_row_number=row_number_val,
+            updates=candidate_updates,
+        )
+    except Exception as e:
+        msg = f"تم التوليد ورُفعت الصورة لكن فشل حفظ البرومت: {type(e).__name__}: {e}"
+        _persist_error(msg)
+        progress.empty()
+        st.error(msg)
+        return False, "", new_url
+
+    # Stash the candidate in session_state so the UI can render it and
+    # show approve/discard buttons. image_url stays untouched until approval.
+    candidate_key = f"candidate_{uid_val}"
+    st.session_state[candidate_key] = {
+        "url":       new_url,
+        "prompt":    new_prompt,
+        "file_id":   file_id,
+        "test_mode": test_mode,
+        "quality":   quality,
+        "ts":        now_ts,
+    }
+
+    progress.progress(100, text="✅ جاهزة للمراجعة")
+    progress.empty()
+
+    msg = "✅ تم التوليد ورُفعت الصورة إلى Drive. راجعيها أدناه واعتمديها لحفظها في الشيت."
+    return True, msg, new_url
+
+
+def commit_regenerated_image(
+    row: pd.Series,
+    candidate: Dict,
+) -> Tuple[bool, str]:
+    """
+    Called ONLY when the reviewer approves a regenerated image candidate.
+    This is the moment image_url (or test_regenerated_image_url) actually
+    changes in the sheet. Returns (ok, message).
+    """
+    uid_val        = str(row.get(COL_UID, ""))
+    filename_val   = str(row.get(COL_FILENAME, ""))
+    row_number_val = str(row.get(COL_ROW_NUMBER, ""))
+
+    new_url   = candidate.get("url", "")
+    new_prompt = candidate.get("prompt", "")
+    file_id   = candidate.get("file_id", "")
+    test_mode = bool(candidate.get("test_mode", True))
+    quality   = candidate.get("quality", "medium")
+    now_ts    = now_riyadh_iso()
+
+    if test_mode:
         updates = {
             COL_TEST_PROMPT:               new_prompt,
             COL_TEST_IMG_URL:              new_url,
             COL_TEST_REGEN_AT:             now_ts,
-            COL_TEST_NOTE:                 f"test_generation; file_id={file_id}; quality={quality}",
+            COL_TEST_NOTE:                 f"approved_by_reviewer; file_id={file_id}; quality={quality}",
             "regeneration_request_status": "test_completed",
         }
     else:
@@ -1558,7 +1669,7 @@ def run_regeneration_pipeline(
         except ValueError:
             new_count = 1
         history_line = (
-            f"[{now_ts}] regenerated → {new_url} "
+            f"[{now_ts}] approved regenerated → {new_url} "
             f"(prev: {prev_url[:60]}; quality: {quality})"
         )
         old_history = str(row.get(COL_REGEN_HISTORY, ""))
@@ -1573,10 +1684,8 @@ def run_regeneration_pipeline(
             "needs_regeneration":          "no",
             "review_status":               ST_PENDING,
             "review_decision":             "",
-            # clear any previous failure note for this row
             "regeneration_note":           "",
         }
-
     try:
         update_review_in_sheet(
             image_uid=uid_val,
@@ -1585,22 +1694,13 @@ def run_regeneration_pipeline(
             updates=updates,
         )
     except Exception as e:
-        msg = f"تم التوليد ورُفعت الصورة لكن فشل تحديث الشيت: {type(e).__name__}: {e}"
-        _persist_error(msg)
-        progress.empty()
-        st.error(msg)
-        return False, "", new_url
+        return False, f"فشل تحديث الشيت: {type(e).__name__}: {e}"
 
-    progress.progress(95, text="💾 تم تحديث الشيت")
-    progress.progress(100, text="✅ تم عرض النتيجة")
-    progress.empty()
-
-    msg = (
-        "✅ تم التوليد. النتيجة محفوظة في أعمدة test_* (الأصل لم يُلمَس)."
+    return True, (
+        "✅ تم اعتماد الصورة وحفظها في أعمدة test_* (الأصل لم يُلمَس)."
         if test_mode else
-        "✅ تم استبدال الصورة بالنسخة الجديدة وحفظ السجل في الشيت."
+        "✅ تم استبدال الصورة الأصلية بالنسخة الجديدة في الشيت."
     )
-    return True, msg, new_url
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1966,19 +2066,6 @@ def render_detail(row: pd.Series):
                     # clear any old clarification
                     st.session_state[clar_key] = ""
                     st.success(message)
-                    if new_url:
-                        try:
-                            st.image(
-                                drive_thumbnail_url(new_url, width=600),
-                                caption="الصورة الجديدة",
-                                width=420,
-                            )
-                        except Exception:
-                            st.markdown(f"[فتح الصورة الجديدة]({new_url})")
-                    # delay-free rerun: let the user see the image first
-                    if st.button("🔄 تحديث الصفحة لعرض التغييرات",
-                                 key=f"refresh_{uid_val}"):
-                        st.rerun()
                 elif message:
                     # Pipeline returned a clarification question (validation failed,
                     # NOT a real error — those are already shown via st.error inside
@@ -1987,8 +2074,58 @@ def render_detail(row: pd.Series):
                     st.warning(f"❓ {message}")
                 else:
                     # Real error — already displayed via st.error inside the pipeline.
-                    # Clear any stale clarification so we don't show old hints.
                     st.session_state[clar_key] = ""
+
+            # ── 8) Candidate review panel ───────────────────────────────────
+            candidate_key = f"candidate_{uid_val}"
+            candidate = st.session_state.get(candidate_key)
+            if candidate:
+                st.markdown(
+                    '<div style="margin-top:18px;padding:14px 16px;'
+                    'background:#FFF8E5;border:1px solid #F1D9A8;border-radius:10px;">'
+                    '<div style="font-size:15px;font-weight:600;color:#6B4A0E;'
+                    'margin-bottom:6px;">🆕 صورة جديدة بانتظار اعتمادك</div>'
+                    '<div style="font-size:13px;color:#3A3A3A;">'
+                    'الصورة محفوظة في Drive لكن الشيت لن يتحدث حتى تعتمديها.'
+                    '</div></div>',
+                    unsafe_allow_html=True,
+                )
+                try:
+                    st.image(
+                        drive_thumbnail_url(candidate["url"], width=600),
+                        caption=f"مُولَّدة في {candidate.get('ts','')}",
+                        width=420,
+                    )
+                except Exception:
+                    st.markdown(f"[فتح الصورة الجديدة]({candidate['url']})")
+
+                col_ok, col_no = st.columns(2)
+                with col_ok:
+                    if st.button(
+                        "✅ اعتماد وحفظ في الشيت",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"approve_cand_{uid_val}",
+                    ):
+                        ok, msg = commit_regenerated_image(row=row, candidate=candidate)
+                        if ok:
+                            st.success(msg)
+                            st.session_state.pop(candidate_key, None)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                with col_no:
+                    if st.button(
+                        "🗑️ تجاهل وتوليد بديل",
+                        use_container_width=True,
+                        key=f"discard_cand_{uid_val}",
+                        help=(
+                            "الصورة تبقى في Drive لكن لن تُحفظ في الشيت. "
+                            "يمكنك تعديل ملاحظاتك وإعادة التوليد."
+                        ),
+                    ):
+                        st.session_state.pop(candidate_key, None)
+                        st.rerun()
 
             st.divider()
 
