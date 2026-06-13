@@ -1011,30 +1011,52 @@ def validate_regenerated_prompt(
         return False, "البرومت الجديد لا يذكر الأسلوب الفوتوغرافي."
 
     # 3) Must NOT contain illustration/cartoon style words — but ONLY when
-    # they appear as a positive mention. Phrases like "no cartoon",
-    # "NOT cartoon style", "without illustration" are GOOD and required.
+    # they appear as a positive mention. The agent's prompt almost always
+    # contains a long negative list like "Do NOT include: text, ..., cartoon
+    # style, illustration style, ..." — those are GOOD and required. We
+    # detect this by splitting into sentences/clauses and checking whether
+    # the clause containing the forbidden word also contains a negation
+    # marker anywhere in it.
     forbidden = ["cartoon", "anime", "illustration style", "painting style",
                   "watercolor", "3d render", "low poly"]
     np_lower = new_prompt.lower()
-    negation_window_chars = 25  # look back ~25 chars before the forbidden term
-    negation_markers = (" no ", " not ", " no-", " not-", " without ", " avoid ",
-                        " never ", " don't ", "do not ", "negative:", "negative ",
-                        "exclude ", "free of ", " no, ")
+
+    # Split into clauses on sentence breakers + colon (so "Do NOT include:"
+    # stays attached to its list)
+    clauses = re.split(r"(?<=[\.\;\n])", np_lower)
+
+    # Also build a "running" clause concept where a colon-terminated phrase
+    # extends to the next sentence break — needed because a clause like
+    # "Do NOT include: text, cartoon, illustration" should be treated as
+    # one negation span. We handle this by joining the previous clause
+    # if it ends with a colon-bearing negation cue.
+    negation_cues_in_clause = (
+        "do not include", "do not contain", "not include", "not contain",
+        "without", "avoid", "negative:", "negative ", "exclude", "free of",
+        " no ", " no, ", " no-", "no text", "no logos", "no cartoon",
+        "no people", "no hands", "no watermark", "no illustration",
+    )
+
+    merged_clauses: List[str] = []
+    carry = ""
+    for cl in clauses:
+        combined = (carry + cl) if carry else cl
+        merged_clauses.append(combined)
+        # if the clause ends with a colon, the negation cue (if any) likely
+        # extends into the next clause too
+        if cl.rstrip().endswith(":") and any(c in cl for c in negation_cues_in_clause):
+            carry = cl  # propagate the negation context forward
+        else:
+            carry = ""
+
     for f in forbidden:
-        start = 0
         positive_hit = False
-        while True:
-            idx = np_lower.find(f, start)
-            if idx == -1:
-                break
-            window_start = max(0, idx - negation_window_chars)
-            window = np_lower[window_start:idx]
-            # also accept if appears right after "no" with no space ("nocartoon" unlikely
-            # but punctuation-separated like "no, cartoon" handled by window check)
-            if not any(m in window for m in negation_markers):
-                positive_hit = True
-                break
-            start = idx + len(f)
+        for cl in merged_clauses:
+            if f in cl:
+                has_negation = any(n in cl for n in negation_cues_in_clause)
+                if not has_negation:
+                    positive_hit = True
+                    break
         if positive_hit:
             return False, f"البرومت الجديد يحتوي على أسلوب ممنوع بصياغة إيجابية: '{f}'."
 
