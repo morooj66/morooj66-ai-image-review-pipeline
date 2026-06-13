@@ -999,27 +999,55 @@ def validate_regenerated_prompt(
             "(احتمال اختراع موضوع مختلف)."
         )
 
-    # 2) Must mention the locked-in style anchors
-    required_phrases = ["#FAFAFA", "photorealistic"]
-    missing = [p for p in required_phrases if p.lower() not in new_prompt.lower()]
-    if missing:
-        return False, f"البرومت الجديد لا يذكر قواعد الأساس: {missing}"
+    # 2) Must mention the locked-in background anchor (relaxed: photo style)
+    required_bg = "#FAFAFA"
+    if required_bg.lower() not in new_prompt.lower():
+        return False, f"البرومت الجديد لا يذكر خلفية {required_bg}."
 
-    # 3) Must NOT contain illustration/cartoon style words
+    # accept any photo-realistic phrasing (not just exact "photorealistic")
+    photo_terms = ["photorealistic", "photo-realistic", "photographic",
+                   "product photography", "studio photo", "realistic photo"]
+    if not any(t in new_prompt.lower() for t in photo_terms):
+        return False, "البرومت الجديد لا يذكر الأسلوب الفوتوغرافي."
+
+    # 3) Must NOT contain illustration/cartoon style words — but ONLY when
+    # they appear as a positive mention. Phrases like "no cartoon",
+    # "NOT cartoon style", "without illustration" are GOOD and required.
     forbidden = ["cartoon", "anime", "illustration style", "painting style",
                   "watercolor", "3d render", "low poly"]
+    np_lower = new_prompt.lower()
+    negation_window_chars = 25  # look back ~25 chars before the forbidden term
+    negation_markers = (" no ", " not ", " no-", " not-", " without ", " avoid ",
+                        " never ", " don't ", "do not ", "negative:", "negative ",
+                        "exclude ", "free of ", " no, ")
     for f in forbidden:
-        if f in new_prompt.lower():
-            return False, f"البرومت الجديد يحتوي على أسلوب ممنوع: '{f}'."
+        start = 0
+        positive_hit = False
+        while True:
+            idx = np_lower.find(f, start)
+            if idx == -1:
+                break
+            window_start = max(0, idx - negation_window_chars)
+            window = np_lower[window_start:idx]
+            # also accept if appears right after "no" with no space ("nocartoon" unlikely
+            # but punctuation-separated like "no, cartoon" handled by window check)
+            if not any(m in window for m in negation_markers):
+                positive_hit = True
+                break
+            start = idx + len(f)
+        if positive_hit:
+            return False, f"البرومت الجديد يحتوي على أسلوب ممنوع بصياغة إيجابية: '{f}'."
 
-    # 4) If reviewer left a visual note, prompt should reflect at least one keyword
+    # 4) (Soft check) If reviewer wrote an Arabic note, we don't reject
+    # purely because tokens don't match — the prompt is in English and
+    # the reviewer writes in Arabic. We only fail if the prompt is
+    # suspiciously short (likely the agent ignored the note entirely).
     rv_note = (reviewer_visual_note or "").strip()
-    if rv_note and len(rv_note) > 8:
-        rv_norm = _normalize_for_compare(rv_note)
-        # extract distinctive words (>=3 chars) from the note
-        note_tokens = [t for t in rv_norm.split() if len(t) >= 3]
-        if note_tokens and not any(t in np_norm for t in note_tokens):
-            return False, "البرومت الجديد لا يعكس ملاحظة المراجع البصرية."
+    if rv_note and len(rv_note) >= 15 and len(new_prompt) < 150:
+        return False, (
+            "البرومت الجديد قصير جداً ولا يبدو أنه يعكس ملاحظتك. "
+            "حاولي إعادة المحاولة أو وضّحي أكثر."
+        )
 
     return True, "passed validation"
 
@@ -1304,6 +1332,7 @@ def run_regeneration_pipeline(
     test_mode: bool,
     fast_mode: bool,
     reviewer_name: str,
+    skip_validation: bool = False,
 ) -> Tuple[bool, str, str]:
     """
     Full background pipeline:
@@ -1408,7 +1437,7 @@ def run_regeneration_pipeline(
         reviewer_visual_note=visual_note.strip(),
     )
 
-    if not ok:
+    if not ok and not skip_validation:
         # save the failure note (no prompt) and return a clarification question
         try:
             update_review_in_sheet(
@@ -1432,6 +1461,10 @@ def run_regeneration_pipeline(
         )
         # image_url not touched — by design
         return False, clarification, ""
+
+    if not ok and skip_validation:
+        # Reviewer chose to override — log it but continue with generation.
+        repair_note = f"[OVERRIDDEN BY REVIEWER] {repair_note}"
 
     # ── Step 4: save the validated prompt (background, hidden from UI) ────
     try:
@@ -1858,9 +1891,25 @@ def render_detail(row: pd.Series):
 
             # ── 6) Show pending clarification (if any from a previous run) ──
             clar_key = f"clar_q_{uid_val}"
+            override_key = f"override_{uid_val}"
             pending_q = st.session_state.get(clar_key, "")
             if pending_q:
                 st.info(f"❓ **سؤال توضيحي:** {pending_q}")
+                col_a, col_b = st.columns([3, 2])
+                with col_b:
+                    if st.button(
+                        "⚠️ تجاوز التحقق وأكمل التوليد",
+                        key=f"btn_override_{uid_val}",
+                        help=(
+                            "يكمل التوليد بنفس ملاحظاتك الحالية متجاوزاً فحص "
+                            "التحقق. مفيد لو شعرتِ أن الفحص صارم جداً."
+                        ),
+                    ):
+                        st.session_state[override_key] = True
+                        st.rerun()
+
+            # consume the override flag if it was set on a previous rerun
+            should_skip_validation = bool(st.session_state.pop(override_key, False))
 
             # ── 7) THE single regenerate button ─────────────────────────────
             label = "🔄 إعادة التوليد"
@@ -1869,14 +1918,17 @@ def render_detail(row: pd.Series):
             else:
                 label += " — 🚨 استبدال الأصل"
 
-            if st.button(
+            # If user clicked override, run the pipeline now with skip_validation=True
+            trigger_run = should_skip_validation or st.button(
                 label,
                 type="primary",
                 use_container_width=True,
                 disabled=not can_regen,
                 help=help_txt,
                 key=f"btn_regen_{uid_val}",
-            ):
+            )
+
+            if trigger_run:
                 success, message, new_url = run_regeneration_pipeline(
                     row=row,
                     issues=issues,
@@ -1885,6 +1937,7 @@ def render_detail(row: pd.Series):
                     test_mode=test_mode,
                     fast_mode=fast_mode,
                     reviewer_name=reviewer_name,
+                    skip_validation=should_skip_validation,
                 )
 
                 if success:
